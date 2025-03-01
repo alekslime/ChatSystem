@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -9,7 +10,7 @@ namespace ChatServer
 {
     class Program
     {
-        private static readonly List<TcpClient> clients = new List<TcpClient>();
+        private static readonly Dictionary<TcpClient, string> clients = new Dictionary<TcpClient, string>();
         private static readonly object lockObject = new object();
 
         static void Main(string[] args)
@@ -37,7 +38,7 @@ namespace ChatServer
 
                     lock (lockObject)
                     {
-                        clients.Add(client);
+                        clients.Add(client, "");
                         Console.WriteLine($"Client connected. Total clients: {clients.Count}");
                     }
 
@@ -76,8 +77,16 @@ namespace ChatServer
                     string message = Encoding.ASCII.GetString(buffer, 0, bytesRead);
                     Console.WriteLine($"Received: {message}");
 
-                    // Broadcast message to all clients
-                    BroadcastMessage(message, client);
+                    // Check if it's a command message
+                    if (message.StartsWith("CMD:"))
+                    {
+                        ProcessCommand(message, client);
+                    }
+                    else
+                    {
+                        // Broadcast regular message to all clients
+                        BroadcastMessage(message, client);
+                    }
                 }
             }
             catch (Exception e)
@@ -89,10 +98,75 @@ namespace ChatServer
                 // Remove client from list and close connection
                 lock (lockObject)
                 {
+                    string username = clients[client];
                     clients.Remove(client);
                     Console.WriteLine($"Client disconnected. Total clients: {clients.Count}");
+
+                    // Notify other clients that this user has left
+                    if (!string.IsNullOrEmpty(username))
+                    {
+                        BroadcastMessage($"CMD:LEAVE:{username}", null);
+                    }
                 }
                 client.Close();
+            }
+        }
+
+        private static void ProcessCommand(string message, TcpClient sender)
+        {
+            string[] parts = message.Split(':');
+            if (parts.Length >= 3)
+            {
+                string command = parts[1];
+                string username = parts[2];
+
+                switch (command)
+                {
+                    case "JOIN":
+                        lock (lockObject)
+                        {
+                            // Store the username for this client
+                            clients[sender] = username;
+
+                            // Notify all clients about the new user
+                            BroadcastMessage($"CMD:JOIN:{username}", null);
+
+                            // Send the current user list to the new client
+                            SendUserList(sender);
+                        }
+                        break;
+
+                    case "LEAVE":
+                        lock (lockObject)
+                        {
+                            // Notify all clients that this user has left
+                            BroadcastMessage($"CMD:LEAVE:{username}", null);
+                        }
+                        break;
+                }
+            }
+        }
+
+        private static void SendUserList(TcpClient client)
+        {
+            lock (lockObject)
+            {
+                // Create a comma-separated list of usernames
+                string userList = string.Join(",", clients.Values.Where(u => !string.IsNullOrEmpty(u)));
+
+                // Send the user list to the client
+                string message = $"CMD:USERS:{userList}";
+                byte[] messageBytes = Encoding.ASCII.GetBytes(message);
+
+                try
+                {
+                    NetworkStream stream = client.GetStream();
+                    stream.Write(messageBytes, 0, messageBytes.Length);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Error sending user list: {e.Message}");
+                }
             }
         }
 
@@ -102,9 +176,9 @@ namespace ChatServer
 
             lock (lockObject)
             {
-                foreach (TcpClient client in clients)
+                foreach (TcpClient client in clients.Keys)
                 {
-                    if (client != sender) // Don't send back to the sender
+                    if (sender == null || client != sender) // Don't send back to the sender if specified
                     {
                         try
                         {
@@ -121,3 +195,4 @@ namespace ChatServer
         }
     }
 }
+
