@@ -100,7 +100,6 @@ namespace ChatClient
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Receive error: {ex.Message}"); // Debug output
                     if (isConnected)
                     {
                         Dispatcher.Invoke(Disconnect);
