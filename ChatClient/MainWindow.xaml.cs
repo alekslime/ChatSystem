@@ -9,12 +9,10 @@ namespace ChatClient
 {
     public partial class MainWindow : Window
     {
-        private TcpClient client;
-        private NetworkStream stream;
-        private Thread receiveThread;
-        private string username;
-        private bool isConnected = false;
-        private HashSet<string> onlineUsers = new HashSet<string>();
+        private TcpClient? client;
+        private NetworkStream? stream;
+        private Thread? receiveThread;
+        private bool isConnected;
 
         public MainWindow()
         {
@@ -27,55 +25,52 @@ namespace ChatClient
             {
                 if (string.IsNullOrWhiteSpace(txtUsername.Text))
                 {
-                    MessageBox.Show("Please enter a username.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show("Please enter a username");
                     return;
                 }
 
-            try
-            {
-                client = new TcpClient("127.0.0.1", 13000);
-                stream = client.GetStream();
+                try
+                {
+                    client = new TcpClient("127.0.0.1", 13000);
+                    stream = client.GetStream();
 
-                // Start a thread to receive messages
-                receiveThread = new Thread(ReceiveMessages);
-                receiveThread.IsBackground = true;
-                receiveThread.Start();
+                    // Send join message with the correct CMD: prefix
+                    string joinMessage = $"CMD:JOIN:{txtUsername.Text}";
+                    byte[] joinBytes = Encoding.UTF8.GetBytes(joinMessage);
+                    stream.Write(joinBytes, 0, joinBytes.Length);
 
-                isConnected = true;
-                btnConnect.Content = "Disconnect";
-                txtUsername.IsEnabled = false;
+                    // Start receiving messages
+                    receiveThread = new Thread(ReceiveMessages);
+                    receiveThread.IsBackground = true;
+                    receiveThread.Start();
 
-                // Add yourself to the user list
-                Dispatcher.Invoke(() => {
-                    if (!onlineUsers.Contains(username))
-                    {
-                        onlineUsers.Add(username);
-                        UpdateUserList();
-                    }
+                    isConnected = true;
+                    btnConnect.Content = "Disconnect";
+                    txtUsername.IsEnabled = false;
+                    btnSend.IsEnabled = true;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Error connecting to server: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show($"Error connecting to server: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Disconnect();
             }
         }
 
-        private void DisconnectFromServer()
+        private void Disconnect()
         {
-                    isConnected = false;
-                    if (receiveThread != null && receiveThread.IsAlive)
-                    {
-                        receiveThread.Join(1000); // Wait for thread to finish
-                    }
+            isConnected = false;
+            stream?.Close();
+            client?.Close();
 
-                    // Update UI
-                    btnConnect.Content = "Connect";
-                    txtUsername.IsEnabled = true;
-                    AppendMessage("Disconnected from server.", Colors.Red);
-
-                    // Clear user list
-                    onlineUsers.Clear();
-                    UpdateUserList();
-                }
+            btnConnect.Content = "Connect";
+            txtUsername.IsEnabled = true;
+            btnSend.IsEnabled = false;
+            lstUsers.Items.Clear();
+        }
 
         private void ReceiveMessages()
         {
@@ -86,86 +81,76 @@ namespace ChatClient
             {
                 try
                 {
-                    bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead > 0)
+                    bytesRead = stream!.Read(buffer, 0, buffer.Length);
+                    if (bytesRead == 0) break;
+
+                    // Use UTF8 encoding to match the server
+                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"Received: {message}"); // Debug output
+
+                    if (message.StartsWith("CMD:USERS:"))
                     {
-                        string message = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                        ProcessMessage(message);
+                        // Extract the user list from after the CMD:USERS: prefix
+                        UpdateUsersList(message.Substring(10));
+                    }
+                    else
+                    {
+                        AppendMessage(message);
                     }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
+                    Console.WriteLine($"Receive error: {ex.Message}"); // Debug output
                     if (isConnected)
                     {
-                        Dispatcher.Invoke(() => DisconnectFromServer());
+                        Dispatcher.Invoke(Disconnect);
                     }
                     break;
                 }
             }
         }
 
-        private void ProcessMessage(string message)
+        private void UpdateUsersList(string users)
         {
-            // Check if it's a command message
-            if (message.StartsWith("CMD:"))
+            Dispatcher.Invoke(() =>
             {
-                string[] parts = message.Split(':');
-                if (parts.Length >= 3)
+                lstUsers.Items.Clear();
+                foreach (string user in users.Split(','))
                 {
-                    string command = parts[1];
-                    string user = parts[2];
-
-                    switch (command)
+                    if (!string.IsNullOrWhiteSpace(user))
                     {
-                        case "JOIN":
-                            Dispatcher.Invoke(() => {
-                                if (!onlineUsers.Contains(user))
-                                {
-                                    onlineUsers.Add(user);
-                                    UpdateUserList();
-                                    AppendMessage($"{user} has joined the chat.", Colors.Green);
-                                }
-                            });
-                            break;
-
-                        case "LEAVE":
-                            Dispatcher.Invoke(() => {
-                                if (onlineUsers.Contains(user))
-                                {
-                                    onlineUsers.Remove(user);
-                                    UpdateUserList();
-                                    AppendMessage($"{user} has left the chat.", Colors.Red);
-                                }
-
-                                Dispatcher.Invoke(() => {
-                                    onlineUsers.Clear();
-                                    foreach (string u in users)
-                                    {
-                                        if (!string.IsNullOrWhiteSpace(u))
-                                        {
-                                            onlineUsers.Add(u);
-                                        }
-                                    }
-                                    UpdateUserList();
-                                });
-                            }
-                            break;
+                        lstUsers.Items.Add(user);
                     }
                 }
-            }
-            else
-            {
-                // Regular chat message
-                Dispatcher.Invoke(() => AppendMessage(message, Colors.Black));
-            }
+            });
         }
 
-        private void UpdateUserList()
+        private void AppendMessage(string message)
         {
-            lstUsers.Items.Clear();
-            foreach (string user in onlineUsers)
+            Dispatcher.Invoke(() =>
             {
-                lstUsers.Items.Add(user);
+                txtChat.AppendText(message + "\n");
+                scrollViewer.ScrollToEnd(); // Changed to ScrollToEnd() to match ScrollViewer method
+            });
+        }
+
+        private void SendMessage()
+        {
+            if (!isConnected || string.IsNullOrWhiteSpace(txtMessage.Text))
+                return;
+
+            try
+            {
+                // No CMD: prefix for regular messages
+                string message = $"{txtUsername.Text}: {txtMessage.Text}";
+                byte[] messageBytes = Encoding.UTF8.GetBytes(message);
+                stream!.Write(messageBytes, 0, messageBytes.Length);
+                txtMessage.Clear();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error sending message: {ex.Message}");
+                Disconnect();
             }
         }
 
@@ -182,10 +167,12 @@ namespace ChatClient
             }
         }
 
-        private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
         {
-            DisconnectFromServer();
+            isConnected = false;
+            stream?.Close();
+            client?.Close();
+            base.OnClosing(e);
         }
     }
 }
-

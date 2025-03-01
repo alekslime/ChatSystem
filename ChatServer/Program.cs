@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -18,167 +17,106 @@ namespace ChatServer
             TcpListener server = null;
             try
             {
-                // Set the TcpListener on port 13000
+                // Listen on all available network interfaces (0.0.0.0)
+                IPAddress localAddr = IPAddress.Any;
                 int port = 13000;
-                IPAddress localAddr = IPAddress.Parse("127.0.0.1");
 
-                // TcpListener server = new TcpListener(port);
                 server = new TcpListener(localAddr, port);
-
-                // Start listening for client requests
                 server.Start();
 
-                Console.WriteLine("Chat Server Started on 127.0.0.1:13000");
-                Console.WriteLine("Waiting for connections...");
+                Console.WriteLine($"Chat Server Started on port {port}");
+                Console.WriteLine("Server is open for connections...");
+                Console.WriteLine("Press Ctrl+C to stop the server");
 
                 while (true)
                 {
-                    // Perform a blocking call to accept requests
                     TcpClient client = server.AcceptTcpClient();
+                    string clientIP = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                    Console.WriteLine($"New connection from: {clientIP}");
 
-                    lock (lockObject)
-                    {
-                        clients.Add(client, "");
-                        Console.WriteLine($"Client connected. Total clients: {clients.Count}");
-                    }
-
-                    // Create a thread to handle communication with this client
                     Thread clientThread = new Thread(HandleClient);
                     clientThread.Start(client);
                 }
             }
-            catch (SocketException e)
+            catch (Exception e)
             {
-                Console.WriteLine("SocketException: {0}", e);
+                Console.WriteLine($"Server Error: {e.Message}");
             }
             finally
             {
-                // Stop listening for new clients
                 server?.Stop();
             }
-
-            Console.WriteLine("Server stopped. Press any key to exit...");
-            Console.ReadKey();
         }
 
         private static void HandleClient(object obj)
         {
             TcpClient client = (TcpClient)obj;
             NetworkStream stream = client.GetStream();
+            string clientIP = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
 
             byte[] buffer = new byte[1024];
             int bytesRead;
 
             try
             {
-                // Read data from the client
                 while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
                 {
-                    string message = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"Received: {message}");
+                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                    // Check if it's a command message
-                    if (message.StartsWith("CMD:"))
+                    if (message.StartsWith("CMD:JOIN:"))
                     {
-                        ProcessCommand(message, client);
+                        // Extract username from join message
+                        string username = message.Substring(9);
+                        lock (lockObject)
+                        {
+                            clients[client] = username;
+                            Console.WriteLine($"User '{username}' joined from {clientIP}");
+                            BroadcastMessage($"{username} joined the chat", null);
+                            SendUserList();
+                        }
                     }
                     else
                     {
-                        // Broadcast regular message to all clients
+                        // Broadcast the message to all clients
                         BroadcastMessage(message, client);
                     }
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Error: {e.Message}");
+                Console.WriteLine($"Error handling client {clientIP}: {e.Message}");
             }
             finally
             {
-                // Remove client from list and close connection
                 lock (lockObject)
                 {
-                    string username = clients[client];
-                    clients.Remove(client);
-                    Console.WriteLine($"Client disconnected. Total clients: {clients.Count}");
-
-                    // Notify other clients that this user has left
-                    if (!string.IsNullOrEmpty(username))
+                    if (clients.TryGetValue(client, out string username))
                     {
-                        BroadcastMessage($"CMD:LEAVE:{username}", null);
+                        clients.Remove(client);
+                        Console.WriteLine($"User '{username}' disconnected from {clientIP}");
+                        BroadcastMessage($"{username} left the chat", null);
+                        SendUserList();
                     }
                 }
                 client.Close();
             }
         }
 
-        private static void ProcessCommand(string message, TcpClient sender)
+        private static void SendUserList()
         {
-            string[] parts = message.Split(':');
-            if (parts.Length >= 3)
-            {
-                string command = parts[1];
-                string username = parts[2];
-
-                switch (command)
-                {
-                    case "JOIN":
-                        lock (lockObject)
-                        {
-                            // Store the username for this client
-                            clients[sender] = username;
-
-                            // Notify all clients about the new user
-                            BroadcastMessage($"CMD:JOIN:{username}", null);
-
-                            // Send the current user list to the new client
-                            SendUserList(sender);
-                        }
-                        break;
-
-                    case "LEAVE":
-                        lock (lockObject)
-                        {
-                            // Notify all clients that this user has left
-                            BroadcastMessage($"CMD:LEAVE:{username}", null);
-                        }
-                        break;
-                }
-            }
+            string userList = "CMD:USERS:" + string.Join(",", clients.Values);
+            BroadcastMessage(userList, null);
         }
 
-        private static void SendUserList(TcpClient client)
+        private static void BroadcastMessage(string message, TcpClient excludeClient)
         {
-            lock (lockObject)
-            {
-                // Create a comma-separated list of usernames
-                string userList = string.Join(",", clients.Values.Where(u => !string.IsNullOrEmpty(u)));
-
-                // Send the user list to the client
-                string message = $"CMD:USERS:{userList}";
-                byte[] messageBytes = Encoding.ASCII.GetBytes(message);
-
-                try
-                {
-                    NetworkStream stream = client.GetStream();
-                    stream.Write(messageBytes, 0, messageBytes.Length);
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"Error sending user list: {e.Message}");
-                }
-            }
-        }
-
-        private static void BroadcastMessage(string message, TcpClient sender)
-        {
-            byte[] broadcastBytes = Encoding.ASCII.GetBytes(message);
+            byte[] broadcastBytes = Encoding.UTF8.GetBytes(message);
 
             lock (lockObject)
             {
                 foreach (TcpClient client in clients.Keys)
                 {
-                    if (sender == null || client != sender) // Don't send back to the sender if specified
+                    if (client != excludeClient && client.Connected)
                     {
                         try
                         {
@@ -187,7 +125,7 @@ namespace ChatServer
                         }
                         catch (Exception e)
                         {
-                            Console.WriteLine($"Error broadcasting: {e.Message}");
+                            Console.WriteLine($"Error broadcasting to client: {e.Message}");
                         }
                     }
                 }
